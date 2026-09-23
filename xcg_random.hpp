@@ -219,12 +219,7 @@ struct xcg : detail::base_rng<USE_LCG_>, detail::salt_array<SALT_N_> {
 
   // Generate a uniformly random uint64_t between [0, 2^64)
   uint64_t operator()() {
-    uint128_t u = this->state;
-    this->state *= MULT;
-    if constexpr (USE_LCG_) {
-      this->state += this->inc;
-    }
-
+    uint128_t u = advance_();
     uint64_t high = static_cast<uint64_t>(u >> 64);
     uint64_t low = static_cast<uint64_t>(u);
 
@@ -245,29 +240,44 @@ struct xcg : detail::base_rng<USE_LCG_>, detail::salt_array<SALT_N_> {
   //  K-bit range: sample >> 2^(258 - 3K/2)
   //
   uint64_t operator()(uint64_t range) {
-    // Calling `this->operator()()` will produce high but destroy low. We will
-    // make a copy of low and salt it before calling the generator function.
-    uint64_t low = static_cast<uint64_t>(this->state);
-    uint64_t high = static_cast<uint64_t>(this->state >> 64);
+    uint128_t u = advance_();
+    uint64_t high = static_cast<uint64_t>(u >> 64);
+    uint64_t low = static_cast<uint64_t>(u);
+
+    high ^= random_salt_(low);
     low ^= random_salt_(high);
 
-    // Generate a salted high and advance the state.
-    uint128_t x = this->operator()();
+    //  Let u = (high * 2^64 + low). Then
+    // 
+    //  (range * u / 2^128)
+    //      = (range * high * 2^64) / 2^128 + (range * low) / 2^128
+    //      = (a * 2^64 + b) / 2^64 + (c * 2^64 + d) / 2^128
+    //      = (a + b / 2^64 + c / 2^64 + d / 2^128)
+    //      = (a + (b + c) / 2^64 + d / 2^128)
+    //
+    //  Now
+    //
+    //  floor(range * u / 2^128)
+    //      = a + floor( ((b + c) * 2^64 + d) / 2^128 )
+    //
+    //  Since ((b + c) * 2^64 + d) < 2^129 the remainder is either 0 or 1. And
+    //  it is 0 if (b + c) < 2^64 and 1 otherwise. d has no impact on the floor
+    //  operation.
 
+    uint128_t x = high;
     x = x * range;
-    uint64_t y = static_cast<uint64_t>(x >> 64);
-    uint64_t f = static_cast<uint64_t>(x);
+    uint64_t a = static_cast<uint64_t>(x >> 64);
+    uint64_t b = static_cast<uint64_t>(x);
 
-    uint128_t xx = low;
-    xx = xx * range;
-    uint64_t z = static_cast<uint64_t>(xx >> 64);
+    uint128_t y = low;
+    y = y * range;
+    uint64_t c = static_cast<uint64_t>(y >> 64);
 
-    // Check if fraction + range can carry.
-    // (a+b < b) compiles to carry flag.
-    return y + ((z + f < f) ? 1 : 0);
+    // (b + c < b) compiles to carry flag.
+    return a + ((b + c < b) ? 1 : 0);
   }
 
-  uint64_t random_salt_(uint64_t value) {
+  inline uint64_t random_salt_(uint64_t value) {
     (void)value; // To silence any warnings that `value` is not used.
     if constexpr (SALT_N_ == 0) {
       return 0;
@@ -278,6 +288,16 @@ struct xcg : detail::base_rng<USE_LCG_>, detail::salt_array<SALT_N_> {
       return this->salts[value >> shift];
     }
   }
+
+  inline uint128_t advance_() {
+    uint128_t u = this->state;
+    this->state *= MULT;
+    if constexpr (USE_LCG_) {
+      this->state += this->inc;
+    }
+    return u;
+  }
+
 };
 
 // Generate a uniformly random uint64_t between [0, 2^64)
