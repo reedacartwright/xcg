@@ -487,32 +487,71 @@ template <XCG xcg_t> double random_f54b(xcg_t &gen) {
   return utility::f54b(gen());
 }
 
-// Generate a value between [0, range) with absolutely no bias.
+/*
+## Generate a value between [0, range) with absolutely no bias.
+
+Let `U0` be uniformly distributed in [0, 1). Then `B = floor(R*U0)` is a
+uniformly distributed integer bounded in [0, R).
+
+Consider, `Xi` be a 64-bit integer uniformly distributed in [0, 2^64). Then
+
+    U0 = X0 * 2^-64 + X1 * 2^-128 + X2 * 2^-192 + ...
+       = 2^-64 * (sum Xi * 2^(-64*i)) where i is [0, infinity)
+
+More generally, let `Uj = sum X{i+j} * 2^(-64*(i+1))` where i is [0, infinity).
+
+And
+
+    R*U0 = R * X0 * 2^-64 + R * X1 * 2^-128 + R * X2 * 2^-192 + ...
+
+Next let `R * Xi = Hi * 2^64 + Fi` Then
+
+    R*U0 = 2^-64 * (H0 * 2^64 + F0) + 2^-64 * R  * U1
+         = H0 + F0 / 2^64 + R * U1 / 2^64
+
+And
+
+    floor(R*U0) = H0 + floor( (F0 + R * U1) / 2^64 ) = H0 + K
+
+Since `F0 < 2^64` and `R * U1 < 2^64`, K is 0 or 1. Note that if
+`F0 + R <= 2^64` then `F0 + R * U1 < 2^64` and `K = 0`.
+
+Let
+
+    F0 + R * U1 = F0 + 2^-64 * (H1 * 2^64 + F1) + 2^-64 * R  * U1
+                = F0 + H1 + F1 / 2^64 + R * U2 / 2^64
+
+Following similar logic to above `(F1 + R * U2) / 2^64 < 2`. Therefore,
+
+    - If `F0 + H1 <= 2^64 - 2`, then `K = 0`
+    - If `F0 + H1 >= 2^64` then `K = 1`.
+    - If `F0 + H1 == 2^64 - 1` the `K = 0 or 1` and more data is needed. 
+*/
 template <XCG xcg_t>
 uint64_t random_u64_bounded_exact(xcg_t &gen, uint64_t range) {
-  uint128_t xx = gen();
-  xx = xx * range;
-  uint64_t y = static_cast<uint64_t>(xx >> 64);
-  uint64_t f = static_cast<uint64_t>(xx);
+  uint128_t x = gen();
+  x *= range;
+  uint64_t h0 = static_cast<uint64_t>(x >> 64);
+  uint64_t f0 = static_cast<uint64_t>(x);
   // Optimize for small ranges
-  if (range + f >= f) [[likely]] {
-    return y;
+  if (range + f0 >= range) [[likely]] {
+    return h0;
   }
   do {
-    xx = gen();
-    xx = xx * range;
-    uint64_t z = static_cast<uint64_t>(xx >> 64);
-    z = z + f;
-    if (z < f) {
+    x = gen();
+    x *= range;
+    uint64_t h1 = static_cast<uint64_t>(x >> 64);
+    f0 += h1;
+    if (f0 < h1) { // if F0 + H1 >= 2^64
       // we have carried
-      return y + 1;
-    } else if (z != -1) {
+      return h0 + 1;
+    } else if (f0 != -1) {
       // we will never carry
       break;
     }
-    f = static_cast<uint64_t>(xx);
-  } while (range + f < f);
-  return y;
+    f0 = static_cast<uint64_t>(x);
+  } while (range + f0 < range);
+  return h0;
 }
 
 template <XCG xcg_t>
