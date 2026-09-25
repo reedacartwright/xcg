@@ -240,12 +240,12 @@ struct xcg : detail::base_rng<USE_LCG_>, detail::salt_array<SALT_N_> {
   //  K-bit range: sample >> 2^(258 - 3K/2)
   //
   uint64_t operator()(uint64_t range) {
-    uint128_t u = advance_();
+    uint128_t u = get_salted_u128_();
     uint64_t high = static_cast<uint64_t>(u >> 64);
     uint64_t low = static_cast<uint64_t>(u);
 
-    high ^= random_salt_(low);
-    low ^= random_salt_(high);
+    // high ^= random_salt_(low);
+    // low ^= random_salt_(high);
 
     //  Let u = (high * 2^64 + low). Then
     // 
@@ -296,6 +296,16 @@ struct xcg : detail::base_rng<USE_LCG_>, detail::salt_array<SALT_N_> {
       this->state += this->inc;
     }
     return u;
+  }
+
+  inline uint128_t get_salted_u128_() {
+    uint128_t u = advance_();
+    uint64_t high = static_cast<uint64_t>(u >> 64);
+    uint64_t low = static_cast<uint64_t>(u);
+    high ^= random_salt_(low);
+    low ^= random_salt_(high);
+    u = high;
+    return (u << 64) | low;
   }
 
 };
@@ -527,7 +537,7 @@ Following similar logic to above `(F1 + R * U2) / 2^64 < 2`. Therefore,
     - If `F0 + H1 >= 2^64` then `K = 1`.
     - If `F0 + H1 == 2^64 - 1` the `K = 0 or 1` and more data is needed. 
 */
-template <XCG xcg_t>
+template <XCG xcg_t> requires(!xcg_t::USE_LCG)
 uint64_t random_u64_bounded_exact(xcg_t &gen, uint64_t range) {
   uint128_t x = gen();
   x *= range;
@@ -553,6 +563,48 @@ uint64_t random_u64_bounded_exact(xcg_t &gen, uint64_t range) {
   } while (range + f0 < range);
   return h0;
 }
+
+template <XCG xcg_t> requires(xcg_t::USE_LCG)
+uint64_t random_u64_bounded_exact(xcg_t &gen, uint64_t range) {
+  uint128_t xy = gen.get_salted_u128_();
+
+  uint128_t x = (xy >> 64);
+  x *= range;
+  uint64_t h0 = static_cast<uint64_t>(x >> 64);
+  uint64_t f0 = static_cast<uint64_t>(x);
+  // Optimize for small ranges
+  if (range + f0 >= range) [[likely]] {
+    return h0;
+  }
+
+  x = static_cast<uint64_t>(xy);
+  x *= range;
+  uint64_t h1 = static_cast<uint64_t>(x >> 64);
+  f0 += h1;
+  if (f0 < h1) {
+    return h0 + 1;
+  } else if (f0 != -1) {
+    return h0;
+  }
+  f0 = static_cast<uint64_t>(x);
+
+  do {
+    x = gen();
+    x *= range;
+    uint64_t h1 = static_cast<uint64_t>(x >> 64);
+    f0 += h1;
+    if (f0 < h1) { // if F0 + H1 >= 2^64
+      // we have carried
+      return h0 + 1;
+    } else if (f0 != -1) {
+      // we will never carry
+      break;
+    }
+    f0 = static_cast<uint64_t>(x);
+  } while (range + f0 < range);
+  return h0;
+}
+
 
 template <XCG xcg_t>
 uint64_t random_u64_bounded_exact(xcg_t &gen, uint64_t umin, uint64_t umax) {
