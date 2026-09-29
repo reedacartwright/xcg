@@ -646,8 +646,8 @@ uint64_t random_u64_bounded_exact_tail(xcg_t &gen, uint64_t range, uint64_t h0,
     x *= range;
     auto h1 = static_cast<uint64_t>(x >> 64U);
     f0 += h1;
-    if (f0 < h1) { // if F0 + H1 >= 2^64
-      // we have carried
+    if (f0 < h1) {
+      // if F0 + H1 >= 2^64, we have carried
       return h0 + 1;
     } else if (f0 < std::numeric_limits<uint64_t>::max()) {
       // we will never carry
