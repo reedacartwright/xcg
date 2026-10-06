@@ -23,19 +23,19 @@
 */
 
 /*
-## XCG: Expanded Congruential Generator
+# XCG: Expanded Congruential Generator
 
 XCG is a family of random number generators inspired by and derived from PCG's
 extended generation scheme <https://www.pcg-random.org/>. At its core, XCG is a
 128-bit linear congruential generator that returns its high 64-bits. This
-simple generator is enough to pass PractRand tests (other than TMFn which is
-designed to detect LCGs.) For flexibility, the family provides generators that
-vary in the sizes of their parameter spaces. For example, XCG-1280 has 1280
-bits of parameter-space: 128 bits for the state of the LCG, 128 bits for the
-increment of the LCG, and 1024 bits for a set of 64-bit salts that are mixed
-into the output.
+simple generator is enough to pass PractRand 0.96 tests at 32TB (other than
+TMFn which is designed to detect LCGs.) For flexibility, the family provides
+generators that vary in the sizes of their parameter spaces. For example,
+XCG-1280 has 1280 bits of parameter-space: 128 bits for the state of the LCG,
+128 bits for the increment of the LCG, and 1024 bits for a set of 64-bit salts
+that are mixed into the output.
 
-### Period
+## Period
 
 The period of XCG is 2^126 if using the MCG core generator or 2^128 if using
 the LCG core generator. While the increment and salts expand the size of XCG's
@@ -43,10 +43,26 @@ parameter space, they do not extend XCG's period. The periods of the core
 generators are big enough that no application will ever wrap around during
 normal usage. This simplifies XCG's algorithm without sacrificing utility or
 parameter-space flexibility.
+
+## Rotation
+
+The standard XCG algorithms fail the TMFn tests found in PractRand 0.96. These
+tests are designed to detect LCGs. The rotating XCG algorithms add a random
+permutation step (bit rotation) to standard algorithm. This permutation step
+is enough to pass the TMFn tests at 32TB.
+
 */
 
 #ifndef XCG_RANDOM_H
 #define XCG_RANDOM_H
+
+#if __cplusplus < 202002L
+#error "xcg_random.hpp requires C++20."
+#endif
+
+#if !defined(__SIZEOF_INT128__)
+#error "xcg_random.hpp requires 128-bit integer support (__SIZEOF_INT128__)."
+#endif
 
 #include <array>
 #include <bit>
@@ -57,14 +73,9 @@ parameter-space flexibility.
 #include <limits>
 #include <ranges>
 #include <span>
+#include <stdint.h>
 #include <type_traits>
 #include <utility>
-
-static_assert(__cplusplus >= 202002L, "XCG requires C++20");
-
-#if !defined(__SIZEOF_INT128__)
-static_assert(false, "XCG requires __uint128_t support");
-#endif
 
 namespace xcg {
 
@@ -74,11 +85,10 @@ using uint128_t = __uint128_t;
 This coefficient came from searching parameter space for the best 64-bit
 multiplier that works for 128-bit LCG, 128-bit MCG, 64-bit LCG, and 64-bit MCG.
 */
-constexpr uint64_t XCG_MULT = 0xf68a43306d8e0225U;
+inline constexpr uint64_t XCG_MULT = 0xf68a43306d8e0225U;
 // 0b1111011010001010010000110011000001101101100011100000001000100101
 
-template <bool USE_LCG_ = false, std::size_t SALT_N_ = 0,
-          bool USE_ROTR_ = false>
+template <bool USE_LCG_ = false, std::size_t SALT_N_ = 0, bool USE_ROT_ = false>
 struct xcg;
 
 /*
@@ -136,14 +146,14 @@ inline uint64_t get_u64(xcg512_t *gen) {
 namespace detail {
 
 // Magic number from the first 128-bits of the fractional part of Sqrt(3).
-constexpr uint64_t MAGICB_64 = 0xbb67ae8584caa73b;
-constexpr uint64_t MAGICB_64_LOW = 0x25742d7078b83b89;
-constexpr uint128_t MAGICB_128 =
+inline constexpr uint64_t MAGICB_64 = 0xbb67ae8584caa73b;
+inline constexpr uint64_t MAGICB_64_LOW = 0x25742d7078b83b89;
+inline constexpr uint128_t MAGICB_128 =
     (static_cast<uint128_t>(MAGICB_64) << 64U) | MAGICB_64_LOW;
 
 // Constant that can be changed to distinguish different applications. It should
 // not be zero.
-constexpr uint32_t HASH_SALT = 1U;
+inline constexpr uint32_t HASH_SALT = 1U;
 
 // Variant 4 of Stafford's mixing algorithms. This is the same mixing algorithm
 // used in splitmix64's 32-bit algorithm.
@@ -154,16 +164,28 @@ constexpr uint32_t finalmix(uint64_t u) noexcept {
   return static_cast<uint32_t>(u >> 32U);
 }
 
+// A single seed word: an integer of at most 64 bits
+template <typename T>
+concept SeedWord = std::integral<std::remove_cvref_t<T>> &&
+                   sizeof(std::remove_cvref_t<T>) <= sizeof(std::uint64_t);
+
+// A multi-pass range of seed words
+template <typename R>
+concept SeedRange = std::ranges::forward_range<const R> &&
+                    SeedWord<std::ranges::range_reference_t<const R>>;
+
 // Ironseed Algorithm B
 //
 // Ironseed hashing is used to initialize the parameter space of an XCG
 // generator. See https://github.com/reedacartwright/ironseed for more
 // information about ironseed. By using both hashing and mixing, this method
 // generates random looking results with excellent avalanche properties.
-constexpr uint32_t ironseed_hash_once(uint64_t &m, const auto &values) {
+constexpr uint32_t ironseed_hash_once(uint64_t &m,
+                                      const SeedRange auto &values) {
   m += MAGICB_64;
   uint64_t entropy = m * 1;
-  for (uint64_t u : values) {
+  for (const auto &v : values) {
+    const auto u = static_cast<uint64_t>(v);
     m += MAGICB_64;
     entropy += m * static_cast<uint32_t>(u);
     m += MAGICB_64;
@@ -218,6 +240,7 @@ struct xcg : detail::base_rng<USE_LCG_>, detail::salt_array<SALT_N_> {
   static constexpr bool USE_LCG = USE_LCG_;
   static constexpr bool USE_ROT = USE_ROT_;
   static constexpr std::size_t SALT_N = SALT_N_;
+  // Number of bytes in the parameter space of this generator
   static constexpr std::size_t PARAM_SIZE =
       sizeof(uint64_t) * (2 + 2 * USE_LCG_ + SALT_N_);
 
@@ -244,7 +267,7 @@ struct xcg : detail::base_rng<USE_LCG_>, detail::salt_array<SALT_N_> {
   // short product. Example algorithms:
   // https://github.com/apple/swift/pull/39143 and
   // https://github.com/KWillets/range_generator/blob/master/include/range_generator.hpp
-  // Has been called Cannon's method after https://github.com/stephentyrone
+  // Has been called Canon's method after https://github.com/stephentyrone
   // <stephentyrone@gmail.com>.
   //
   // Result is floor(range * u / 2^128) where u uniform in [0, 2^128)
@@ -349,14 +372,8 @@ uint64_t random_u64(xcg_t &gen, uint64_t umin, uint64_t umax) {
   return umin + gen(umax - umin);
 }
 
-// Concept for a range that is convertible to a uint64_t
-template <typename R>
-concept ULongRange =
-    std::ranges::forward_range<const R> &&
-    std::convertible_to<std::ranges::range_value_t<R>, uint64_t>;
-
 // Seed using a range of values
-template <XCG xcg_t, ULongRange Range>
+template <XCG xcg_t, detail::SeedRange Range>
 constexpr void seed(xcg_t &gen, const Range &values) {
   uint64_t magic = 0;
 
@@ -393,60 +410,57 @@ constexpr void seed(xcg_t &gen, const Range &values) {
   }
 }
 
-template <XCG xcg_t, std::convertible_to<uint64_t> T>
+template <XCG xcg_t, detail::SeedWord T>
 constexpr void seed(xcg_t &gen, std::initializer_list<T> il) {
   // Use a span here to avoid an infinite recursion.
   seed(gen, std::span<const T>{il});
 }
 
-template <XCG xcg_t, std::convertible_to<uint64_t>... Args>
+template <XCG xcg_t, detail::SeedWord... Args>
 constexpr void seed(xcg_t &gen, Args &&...args) {
   seed(gen, std::initializer_list<uint64_t>{
                 static_cast<uint64_t>(std::forward<Args>(args))...});
 }
 
-// Jump XCG state by 2^64 steps. The method comes from Brown (1994) Random
-// number generation with arbitrary stride. Transactions of the American Nuclear
-// Society. 71. Code adapted from PCG.
-template <XCG xcg_t>
+// Jump XCG state forward by 2^LOG2_STEPS steps. The method comes from Brown
+// (1994) Random number generation with arbitrary stride. Transactions of the
+// American Nuclear Society. 71. Code adapted from PCG.
+template <unsigned LOG2_STEPS_, XCG xcg_t>
 [[nodiscard]]
-auto permute_state(xcg_t gen) {
+constexpr auto permute_state_pow2(xcg_t gen) {
+  static_assert(LOG2_STEPS_ < 128, "LOG2_STEPS must be less than 128");
   uint128_t cur_mult = xcg_t::MULT;
   uint128_t cur_plus = 0;
   if constexpr (xcg_t::USE_LCG) {
     cur_plus = gen.inc;
   }
-  for (int i = 0; i < 64; ++i) {
+  for (unsigned i = 0; i < LOG2_STEPS_; ++i) {
     cur_plus *= (cur_mult + 1);
     cur_mult *= cur_mult;
   }
   gen.state = cur_mult * gen.state + cur_plus;
   return gen;
+}
+
+// Jump XCG state by 2^64 steps.
+template <XCG xcg_t>
+[[nodiscard]]
+constexpr auto permute_state(xcg_t gen) {
+  return permute_state_pow2<64>(gen);
 }
 
 // Jump XCG state by 2^96 steps.
 template <XCG xcg_t>
 [[nodiscard]]
-auto permute_state_huge(xcg_t gen) {
-  uint128_t cur_mult = xcg_t::MULT;
-  uint128_t cur_plus = 0;
-  if constexpr (xcg_t::USE_LCG) {
-    cur_plus = gen.inc;
-  }
-  for (int i = 0; i < 96; ++i) {
-    cur_plus *= (cur_mult + 1);
-    cur_mult *= cur_mult;
-  }
-  gen.state = cur_mult * gen.state + cur_plus;
-  return gen;
+constexpr auto permute_state_huge(xcg_t gen) {
+  return permute_state_pow2<96>(gen);
 }
 
 // Permute XCG increment using a Weyl sequence while keeping it odd.
 template <XCG xcg_t>
+  requires(xcg_t::USE_LCG)
 [[nodiscard]]
-auto permute_increment(xcg_t gen) {
-  static_assert(xcg_t::USE_LCG,
-                "Updating increment requires an XCG with an increment.");
+constexpr auto permute_increment(xcg_t gen) {
   // Make sure that our magic constant is 2*(an odd number).
   constexpr uint128_t w = 2 * detail::MAGICB_128;
   gen.inc += w;
@@ -459,10 +473,9 @@ auto permute_increment(xcg_t gen) {
 // does not change the underlying generator, and this can be detected by XORing
 // two related streams together.
 template <XCG xcg_t>
+  requires(xcg_t::SALT_N > 0)
 [[nodiscard]]
-auto permute_salts(xcg_t gen) {
-  static_assert(xcg_t::SALT_N > 0,
-                "Updating salt requires an XCG that uses salts.");
+constexpr auto permute_salts(xcg_t gen) {
   uint64_t carry = 0;
   for (uint64_t &salt : gen.salts) {
     uint128_t sum = static_cast<uint128_t>(salt) + detail::MAGICB_64 + carry;
@@ -607,7 +620,7 @@ Following similar logic to above `(F1 + R * U2) / 2^64 < 2`. Therefore,
 
     - If `F0 + H1 <= 2^64 - 2`, then `K = 0`
     - If `F0 + H1 >= 2^64` then `K = 1`.
-    - If `F0 + H1 == 2^64 - 1` the `K = 0 or 1` and more data is needed.
+    - If `F0 + H1 == 2^64 - 1` then `K = 0 or 1` and more data is needed.
 */
 template <XCG xcg_t>
 inline uint64_t random_u64_bounded_exact(xcg_t &gen, uint64_t range) {
@@ -647,18 +660,29 @@ uint64_t random_u64_bounded_exact_tail(xcg_t &gen, uint64_t range, uint64_t h0,
 
 } // namespace detail
 
+// Unbiased uniform uint64_t in [umin, umax). Assumes umin <= umax.
 template <XCG xcg_t>
 uint64_t random_u64_bounded_exact(xcg_t &gen, uint64_t umin, uint64_t umax) {
   return umin + random_u64_bounded_exact(gen, umax - umin);
 }
 
-using xcg128_t = xcg<false, 0>;
-using xcg256_t = xcg<true, 0>;
-using xcg320_t = xcg<true, 1>;
-using xcg384_t = xcg<true, 2>;
-using xcg512_t = xcg<true, 4>;
-using xcg768_t = xcg<true, 8>;
-using xcg1280_t = xcg<true, 16>;
+// without rotation
+using xcg128_t = xcg<false, 0, false>;
+using xcg256_t = xcg<true, 0, false>;
+using xcg320_t = xcg<true, 1, false>;
+using xcg384_t = xcg<true, 2, false>;
+using xcg512_t = xcg<true, 4, false>;
+using xcg768_t = xcg<true, 8, false>;
+using xcg1280_t = xcg<true, 16, false>;
+
+// with rotation
+using xcg128r_t = xcg<false, 0, true>;
+using xcg256r_t = xcg<true, 0, true>;
+using xcg320r_t = xcg<true, 1, true>;
+using xcg384r_t = xcg<true, 2, true>;
+using xcg512r_t = xcg<true, 4, true>;
+using xcg768r_t = xcg<true, 8, true>;
+using xcg1280r_t = xcg<true, 16, true>;
 
 } // namespace xcg
 
