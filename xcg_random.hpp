@@ -294,7 +294,7 @@ struct xcg : detail::base_rng<USE_LCG_>, detail::salt_array<SALT_N_> {
     return a + ((b + c < c) ? 1 : 0);
   }
 
-  [[nodiscard]] constexpr uint64_t random_salt_(uint64_t value) const noexcept {
+  constexpr uint64_t random_salt_(uint64_t value) const noexcept {
     (void)value; // To silence any warnings that `value` is not used.
     if constexpr (SALT_N_ == 0) {
       return 0;
