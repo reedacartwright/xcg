@@ -73,7 +73,6 @@ is enough to pass the TMFn tests at 32TB.
 #include <limits>
 #include <ranges>
 #include <span>
-#include <stdint.h>
 #include <type_traits>
 #include <utility>
 
@@ -85,11 +84,8 @@ using uint128_t = __uint128_t;
 This coefficient came from searching parameter space for the best 64-bit
 multiplier that works for 128-bit LCG, 128-bit MCG, 64-bit LCG, and 64-bit MCG.
 */
-inline constexpr uint64_t XCG_MULT = 0xf68a43306d8e0225U;
+inline constexpr std::uint64_t XCG_MULT = 0xf68a43306d8e0225U;
 // 0b1111011010001010010000110011000001101101100011100000001000100101
-
-template <bool USE_LCG_ = false, std::size_t SALT_N_ = 0, bool USE_ROT_ = false>
-struct xcg;
 
 /*
 // Example simple implementations of XCG generators
@@ -146,22 +142,22 @@ inline uint64_t get_u64(xcg512_t *gen) {
 namespace detail {
 
 // Magic number from the first 128-bits of the fractional part of Sqrt(3).
-inline constexpr uint64_t MAGICB_64 = 0xbb67ae8584caa73b;
-inline constexpr uint64_t MAGICB_64_LOW = 0x25742d7078b83b89;
+inline constexpr std::uint64_t MAGICB_64 = 0xbb67ae8584caa73b;
+inline constexpr std::uint64_t MAGICB_64_LOW = 0x25742d7078b83b89;
 inline constexpr uint128_t MAGICB_128 =
-    (static_cast<uint128_t>(MAGICB_64) << 64U) | MAGICB_64_LOW;
+    (uint128_t{MAGICB_64} << 64U) | MAGICB_64_LOW;
 
 // Constant that can be changed to distinguish different applications. It should
 // not be zero.
-inline constexpr uint32_t HASH_SALT = 1U;
+inline constexpr std::uint32_t HASH_SALT = 1U;
 
 // Variant 4 of Stafford's mixing algorithms. This is the same mixing algorithm
 // used in splitmix64's 32-bit algorithm.
 // URL: http://zimbry.blogspot.com/2011/09/better-bit-mixing-improving-on.html
-constexpr uint32_t finalmix(uint64_t u) noexcept {
+constexpr std::uint32_t finalmix(std::uint64_t u) noexcept {
   u = (u ^ (u >> 33U)) * 0x62a9d9ed799705f5;
   u = (u ^ (u >> 28U)) * 0xcb24d0a5c88c35b3;
-  return static_cast<uint32_t>(u >> 32U);
+  return static_cast<std::uint32_t>(u >> 32U);
 }
 
 // A single seed word: an integer of at most 64 bits
@@ -180,16 +176,16 @@ concept SeedRange = std::ranges::forward_range<const R> &&
 // generator. See https://github.com/reedacartwright/ironseed for more
 // information about ironseed. By using both hashing and mixing, this method
 // generates random looking results with excellent avalanche properties.
-constexpr uint32_t ironseed_hash_once(uint64_t &m,
-                                      const SeedRange auto &values) {
+constexpr std::uint32_t ironseed_hash_once(std::uint64_t &m,
+                                           const SeedRange auto &values) {
   m += MAGICB_64;
-  uint64_t entropy = m * 1;
+  std::uint64_t entropy = m * 1;
   for (const auto &v : values) {
-    const auto u = static_cast<uint64_t>(v);
+    const auto u = static_cast<std::uint64_t>(v);
     m += MAGICB_64;
-    entropy += m * static_cast<uint32_t>(u);
+    entropy += m * static_cast<std::uint32_t>(u);
     m += MAGICB_64;
-    entropy += m * static_cast<uint32_t>(u >> 32U);
+    entropy += m * static_cast<std::uint32_t>(u >> 32U);
   }
   m += MAGICB_64;
   entropy += m * HASH_SALT;
@@ -198,62 +194,75 @@ constexpr uint32_t ironseed_hash_once(uint64_t &m,
 
 consteval bool is_pow2(std::size_t n) { return (n & (n - 1)) == 0; }
 
-template <bool USE_LCG_> struct base_rng {
-  uint128_t state = 1U;
+enum class BaseGen : std::uint8_t { MCG = 0, LCG_FIXED, LCG_PARAM };
+
+// Initialize default state to XCG_MULT^2 so the first output is not 0.
+inline constexpr uint128_t XCG_DEFAULT = uint128_t{XCG_MULT} * XCG_MULT;
+
+template <BaseGen BASE_GEN_> struct base_rng {
+  uint128_t state = XCG_DEFAULT;
+  friend constexpr bool operator==(const base_rng &,
+                                   const base_rng &) = default;
 };
 
-template <> struct base_rng<true> {
-  uint128_t state = 0U;
+template <> struct base_rng<BaseGen::LCG_PARAM> {
+  uint128_t state = XCG_DEFAULT;
   uint128_t inc = 1U;
+  friend constexpr bool operator==(const base_rng &,
+                                   const base_rng &) = default;
 };
 
 template <std::size_t SALT_N_> struct salt_array {
-  std::array<uint64_t, SALT_N_> salts{};
+  std::array<std::uint64_t, SALT_N_> salts{};
+  friend constexpr bool operator==(const salt_array &,
+                                   const salt_array &) = default;
 };
 
-template <> struct salt_array<0> {};
+template <> struct salt_array<0> {
+  friend constexpr bool operator==(const salt_array &,
+                                   const salt_array &) = default;
+};
 
 // Helpers for XCG concept
 template <typename> struct is_xcg : std::false_type {};
 
-template <bool B, std::size_t N, bool R>
-struct is_xcg<xcg<B, N, R>> : std::true_type {};
-
 } // namespace detail
 
-template <typename T>
-concept XCG = detail::is_xcg<std::remove_cvref_t<T>>::value;
+using BaseGen = detail::BaseGen;
 
 // XCG template
 //
-//  USE_LCG_ = use an LCG (true) or MCG (false)
+//  BASE_GEN_ = type of base generator to use
 //  SALT_N_ = size of the salt array
 //  USE_ROT_ = if true, permute high bits using a random rotation based on low
 //
-template <bool USE_LCG_, std::size_t SALT_N_, bool USE_ROT_>
-struct xcg : detail::base_rng<USE_LCG_>, detail::salt_array<SALT_N_> {
+template <BaseGen BASE_GEN_ = BaseGen::MCG, std::size_t SALT_N_ = 0,
+          bool USE_ROT_ = false>
+struct xcg_gen : detail::base_rng<BASE_GEN_>, detail::salt_array<SALT_N_> {
   static_assert(detail::is_pow2(SALT_N_), "SALT_N_ must be a power of two");
 
-  using xcg_type = xcg;
+  using xcg_type = xcg_gen;
 
-  static constexpr uint64_t MULT = XCG_MULT;
-  static constexpr bool USE_LCG = USE_LCG_;
+  static constexpr std::uint64_t MULT = XCG_MULT;
+  static constexpr BaseGen BASE_GEN = BASE_GEN_;
   static constexpr bool USE_ROT = USE_ROT_;
   static constexpr std::size_t SALT_N = SALT_N_;
   // Number of bytes in the parameter space of this generator
   static constexpr std::size_t PARAM_SIZE =
-      sizeof(uint64_t) * (2 + 2 * USE_LCG_ + SALT_N_);
+      sizeof(std::uint64_t) *
+      (2 + 2 * (BASE_GEN_ == BaseGen::LCG_PARAM) + SALT_N_);
 
-  constexpr xcg() = default;
+  constexpr xcg_gen() = default;
+  friend constexpr bool operator==(const xcg_gen &, const xcg_gen &) = default;
 
   // Generate a uniformly random uint64_t between [0, 2^64)
-  constexpr uint64_t operator()() noexcept {
+  constexpr std::uint64_t operator()() noexcept {
     uint128_t u = advance_and_salt_();
-    return static_cast<uint64_t>(u >> 64U);
+    return static_cast<std::uint64_t>(u >> 64U);
   }
 
   // compatibility with <random>
-  using result_type = uint64_t;
+  using result_type = std::uint64_t;
 
   static constexpr result_type min() noexcept {
     return std::numeric_limits<result_type>::min();
@@ -276,10 +285,10 @@ struct xcg : detail::base_rng<USE_LCG_>, detail::salt_array<SALT_N_> {
   // 32-bit range: sample >> 2^210
   //  K-bit range: sample >> 2^(258 - 3K/2)
   //
-  constexpr uint64_t operator()(uint64_t range) noexcept {
+  constexpr std::uint64_t operator()(std::uint64_t range) noexcept {
     uint128_t u = advance_and_salt_();
-    auto high = static_cast<uint64_t>(u >> 64U);
-    auto low = static_cast<uint64_t>(u);
+    auto high = static_cast<std::uint64_t>(u >> 64U);
+    auto low = static_cast<std::uint64_t>(u);
 
     //  Let u = (high * 2^64 + low). Then
     //
@@ -300,8 +309,8 @@ struct xcg : detail::base_rng<USE_LCG_>, detail::salt_array<SALT_N_> {
 
     uint128_t x = high;
     x = x * range;
-    auto a = static_cast<uint64_t>(x >> 64U);
-    auto b = static_cast<uint64_t>(x);
+    auto a = static_cast<std::uint64_t>(x >> 64U);
+    auto b = static_cast<std::uint64_t>(x);
 
     // Uncomment to optimize for "small" ranges
     // Note this can have worse performance if range > 2^58
@@ -311,13 +320,14 @@ struct xcg : detail::base_rng<USE_LCG_>, detail::salt_array<SALT_N_> {
 
     uint128_t y = low;
     y = y * range;
-    auto c = static_cast<uint64_t>(y >> 64U);
+    auto c = static_cast<std::uint64_t>(y >> 64U);
 
     // (b + c < c) compiles to carry flag.
-    return a + ((b + c < c) ? 1 : 0);
+    return a + ((b + c < c) ? 1U : 0U);
   }
 
-  constexpr uint64_t random_salt_(uint64_t value) const noexcept {
+  [[nodiscard]]
+  constexpr std::uint64_t random_salt_(std::uint64_t value) const noexcept {
     (void)value; // To silence any warnings that `value` is not used.
     if constexpr (SALT_N_ == 0) {
       return 0;
@@ -332,7 +342,10 @@ struct xcg : detail::base_rng<USE_LCG_>, detail::salt_array<SALT_N_> {
   constexpr uint128_t advance_() noexcept {
     uint128_t u = this->state;
     this->state *= MULT;
-    if constexpr (USE_LCG_) {
+
+    if constexpr (BASE_GEN == BaseGen::LCG_FIXED) {
+      this->state += MULT;
+    } else if constexpr (BASE_GEN == BaseGen::LCG_PARAM) {
       this->state += this->inc;
     }
     return u;
@@ -340,12 +353,13 @@ struct xcg : detail::base_rng<USE_LCG_>, detail::salt_array<SALT_N_> {
 
   constexpr uint128_t advance_and_salt_() noexcept {
     uint128_t u = advance_();
-    auto high = static_cast<uint64_t>(u >> 64U);
-    auto low = static_cast<uint64_t>(u);
+    auto high = static_cast<std::uint64_t>(u >> 64U);
+    auto low = static_cast<std::uint64_t>(u);
 
     // Permute high bits. Don't permute the low bits because for MCGs it will
     // spread the bias of bits 0 and 1 to the rest. Intentionally use the
-    // highest bits for both rotating and salting to avoid extra instructions.
+    // highest bits of low for both rotating and salting to avoid extra
+    // instructions.
     if constexpr (USE_ROT_) {
       high = std::rotr(high, static_cast<int>(low >> 58U));
     }
@@ -358,30 +372,40 @@ struct xcg : detail::base_rng<USE_LCG_>, detail::salt_array<SALT_N_> {
   }
 };
 
+namespace detail {
+
+template <BaseGen B, std::size_t N, bool R>
+struct is_xcg<xcg_gen<B, N, R>> : std::true_type {};
+
+} // namespace detail
+
+template <typename T>
+concept XCG = detail::is_xcg<std::remove_cvref_t<T>>::value;
+
 // Generate a uniformly random uint64_t between [0, 2^64)
-template <XCG xcg_t> uint64_t random_u64(xcg_t &gen) { return gen(); }
+template <XCG xcg_t> std::uint64_t random_u64(xcg_t &gen) { return gen(); }
 
 // Generate a uniformly random uint64_t between [0, range)
-template <XCG xcg_t> uint64_t random_u64(xcg_t &gen, uint64_t range) {
+template <XCG xcg_t> std::uint64_t random_u64(xcg_t &gen, std::uint64_t range) {
   return gen(range);
 }
 
 // Generate a uniformly random uint64_t between [umin, umax)
 template <XCG xcg_t>
-uint64_t random_u64(xcg_t &gen, uint64_t umin, uint64_t umax) {
+std::uint64_t random_u64(xcg_t &gen, std::uint64_t umin, std::uint64_t umax) {
   return umin + gen(umax - umin);
 }
 
 // Seed using a range of values
 template <XCG xcg_t, detail::SeedRange Range>
 constexpr void seed(xcg_t &gen, const Range &values) {
-  uint64_t magic = 0;
+  std::uint64_t magic = 0;
 
   // Helper functions
   auto next_u32 = [&]() { return detail::ironseed_hash_once(magic, values); };
   auto next_u64 = [&]() {
-    uint64_t low = next_u32();
-    uint64_t high = next_u32();
+    std::uint64_t low = next_u32();
+    std::uint64_t high = next_u32();
 
     return low | (high << 32U);
   };
@@ -396,15 +420,15 @@ constexpr void seed(xcg_t &gen, const Range &values) {
   // Initialize state space.
   gen.state = next_u128();
 
-  if constexpr (xcg_t::USE_LCG) {
+  if constexpr (xcg_t::BASE_GEN == BaseGen::MCG) {
+    gen.state |= 1U;
+  } else if constexpr (xcg_t::BASE_GEN == BaseGen::LCG_PARAM) {
     gen.inc = next_u128();
-    gen.inc |= 1;
-  } else {
-    gen.state |= 1;
+    gen.inc |= 1U;
   }
 
   if constexpr (xcg_t::SALT_N > 0) {
-    for (uint64_t &salt : gen.salts) {
+    for (std::uint64_t &salt : gen.salts) {
       salt = next_u64();
     }
   }
@@ -418,20 +442,22 @@ constexpr void seed(xcg_t &gen, std::initializer_list<T> il) {
 
 template <XCG xcg_t, detail::SeedWord... Args>
 constexpr void seed(xcg_t &gen, Args &&...args) {
-  seed(gen, std::initializer_list<uint64_t>{
-                static_cast<uint64_t>(std::forward<Args>(args))...});
+  seed(gen, std::initializer_list<std::uint64_t>{
+                static_cast<std::uint64_t>(std::forward<Args>(args))...});
 }
 
 // Jump XCG state forward by 2^LOG2_STEPS steps. The method comes from Brown
 // (1994) Random number generation with arbitrary stride. Transactions of the
 // American Nuclear Society. 71. Code adapted from PCG.
-template <unsigned LOG2_STEPS_, XCG xcg_t>
+template <unsigned int LOG2_STEPS_, XCG xcg_t>
 [[nodiscard]]
 constexpr auto permute_state_pow2(xcg_t gen) {
   static_assert(LOG2_STEPS_ < 128, "LOG2_STEPS must be less than 128");
   uint128_t cur_mult = xcg_t::MULT;
   uint128_t cur_plus = 0;
-  if constexpr (xcg_t::USE_LCG) {
+  if constexpr (xcg_t::BASE_GEN == BaseGen::LCG_FIXED) {
+    cur_plus = xcg_t::MULT;
+  } else if constexpr (xcg_t::BASE_GEN == BaseGen::LCG_PARAM) {
     cur_plus = gen.inc;
   }
   for (unsigned i = 0; i < LOG2_STEPS_; ++i) {
@@ -458,7 +484,7 @@ constexpr auto permute_state_huge(xcg_t gen) {
 
 // Permute XCG increment using a Weyl sequence while keeping it odd.
 template <XCG xcg_t>
-  requires(xcg_t::USE_LCG)
+  requires(xcg_t::BASE_GEN == BaseGen::LCG_PARAM)
 [[nodiscard]]
 constexpr auto permute_increment(xcg_t gen) {
   // Make sure that our magic constant is 2*(an odd number).
@@ -476,11 +502,11 @@ template <XCG xcg_t>
   requires(xcg_t::SALT_N > 0)
 [[nodiscard]]
 constexpr auto permute_salts(xcg_t gen) {
-  uint64_t carry = 0;
-  for (uint64_t &salt : gen.salts) {
+  std::uint64_t carry = 0;
+  for (std::uint64_t &salt : gen.salts) {
     uint128_t sum = static_cast<uint128_t>(salt) + detail::MAGICB_64 + carry;
-    salt = static_cast<uint64_t>(sum);
-    carry = static_cast<uint64_t>(sum >> 64U);
+    salt = static_cast<std::uint64_t>(sum);
+    carry = static_cast<std::uint64_t>(sum >> 64U);
   }
 
   return gen;
@@ -488,59 +514,61 @@ constexpr auto permute_salts(xcg_t gen) {
 
 namespace utility {
 
-constexpr int64_t i64(uint64_t u) noexcept { return static_cast<int64_t>(u); }
-constexpr int64_t i63(uint64_t u) noexcept {
-  return static_cast<int64_t>(u >> 1U);
+constexpr std::int64_t i64(std::uint64_t u) noexcept {
+  return static_cast<std::int64_t>(u);
 }
-constexpr int64_t i54s(uint64_t u) noexcept {
-  return static_cast<int64_t>(u) >> 10U;
+constexpr std::int64_t i63(std::uint64_t u) noexcept {
+  return static_cast<std::int64_t>(u >> 1U);
 }
-constexpr int64_t i53(uint64_t u) noexcept {
-  return static_cast<int64_t>(u >> 11U);
+constexpr std::int64_t i54s(std::uint64_t u) noexcept {
+  return static_cast<std::int64_t>(u) >> 10U;
+}
+constexpr std::int64_t i53(std::uint64_t u) noexcept {
+  return static_cast<std::int64_t>(u >> 11U);
 }
 
 // uniform in [0,1] with variable steps
-constexpr double f64(uint64_t u) noexcept {
+constexpr double f64(std::uint64_t u) noexcept {
   return static_cast<double>(u) * (1.0 / 18446744073709551616.0);
 }
 
 // uniform in [-1,1] with variable steps
-constexpr double f64s(uint64_t u) noexcept {
+constexpr double f64s(std::uint64_t u) noexcept {
   return static_cast<double>(i64(u)) * (1.0 / 9223372036854775808.0);
 }
 
 // uniform in [0,1] with variable steps
-constexpr double f63(uint64_t u) noexcept {
+constexpr double f63(std::uint64_t u) noexcept {
   return static_cast<double>(i63(u)) * (1.0 / 9223372036854775808.0);
 }
 
 // uniform in [-1,1) with equal steps
-constexpr double f54(uint64_t u) noexcept {
+constexpr double f54(std::uint64_t u) noexcept {
   return static_cast<double>(i54s(u)) * (1.0 / 9007199254740992.0);
 }
 
 // uniform in (-1,1] with equal steps
-constexpr double f54a(uint64_t u) noexcept {
+constexpr double f54a(std::uint64_t u) noexcept {
   return static_cast<double>(i54s(u) + 1) * (1.0 / 9007199254740992.0);
 }
 
 // uniform in (-1,1) with equal steps
-constexpr double f54b(uint64_t u) noexcept {
+constexpr double f54b(std::uint64_t u) noexcept {
   return static_cast<double>(i54s(u) | 1) * (1.0 / 9007199254740992.0);
 }
 
 // uniform in [0,1) with equal steps
-constexpr double f53(uint64_t u) noexcept {
+constexpr double f53(std::uint64_t u) noexcept {
   return static_cast<double>(i53(u)) * (1.0 / 9007199254740992.0);
 }
 
 // uniform in (0,1] with equal steps
-constexpr double f53a(uint64_t u) noexcept {
+constexpr double f53a(std::uint64_t u) noexcept {
   return static_cast<double>(i53(u) + 1) * (1.0 / 9007199254740992.0);
 }
 
 // uniform in (0,1) with equal steps
-constexpr double f53b(uint64_t u) noexcept {
+constexpr double f53b(std::uint64_t u) noexcept {
   return static_cast<double>(i53(u) | 1) * (1.0 / 9007199254740992.0);
 }
 
@@ -578,8 +606,8 @@ template <XCG xcg_t> double random_f54b(xcg_t &gen) {
 
 namespace detail {
 template <XCG xcg_t>
-uint64_t random_u64_bounded_exact_tail(xcg_t &gen, uint64_t range, uint64_t h0,
-                                       uint64_t f0);
+std::uint64_t random_u64_bounded_exact_tail(xcg_t &gen, std::uint64_t range,
+                                            std::uint64_t h0, std::uint64_t f0);
 }
 
 /*
@@ -623,11 +651,11 @@ Following similar logic to above `(F1 + R * U2) / 2^64 < 2`. Therefore,
     - If `F0 + H1 == 2^64 - 1` then `K = 0 or 1` and more data is needed.
 */
 template <XCG xcg_t>
-inline uint64_t random_u64_bounded_exact(xcg_t &gen, uint64_t range) {
+inline std::uint64_t random_u64_bounded_exact(xcg_t &gen, std::uint64_t range) {
   uint128_t x = gen();
   x *= range;
-  auto h0 = static_cast<uint64_t>(x >> 64U);
-  auto f0 = static_cast<uint64_t>(x);
+  auto h0 = static_cast<std::uint64_t>(x >> 64U);
+  auto f0 = static_cast<std::uint64_t>(x);
   // Optimize for small ranges
   if (range + f0 >= range) [[likely]] {
     return h0;
@@ -639,21 +667,22 @@ inline uint64_t random_u64_bounded_exact(xcg_t &gen, uint64_t range) {
 namespace detail {
 
 template <XCG xcg_t>
-uint64_t random_u64_bounded_exact_tail(xcg_t &gen, uint64_t range, uint64_t h0,
-                                       uint64_t f0) {
+std::uint64_t random_u64_bounded_exact_tail(xcg_t &gen, std::uint64_t range,
+                                            std::uint64_t h0,
+                                            std::uint64_t f0) {
   do {
     uint128_t x = gen();
     x *= range;
-    auto h1 = static_cast<uint64_t>(x >> 64U);
+    auto h1 = static_cast<std::uint64_t>(x >> 64U);
     f0 += h1;
     if (f0 < h1) {
       // if F0 + H1 >= 2^64, we have carried
       return h0 + 1;
-    } else if (f0 < std::numeric_limits<uint64_t>::max()) {
+    } else if (f0 < std::numeric_limits<std::uint64_t>::max()) {
       // we will never carry
       break;
     }
-    f0 = static_cast<uint64_t>(x);
+    f0 = static_cast<std::uint64_t>(x);
   } while (range + f0 < range);
   return h0;
 }
@@ -662,27 +691,30 @@ uint64_t random_u64_bounded_exact_tail(xcg_t &gen, uint64_t range, uint64_t h0,
 
 // Unbiased uniform uint64_t in [umin, umax). Assumes umin <= umax.
 template <XCG xcg_t>
-uint64_t random_u64_bounded_exact(xcg_t &gen, uint64_t umin, uint64_t umax) {
+std::uint64_t random_u64_bounded_exact(xcg_t &gen, std::uint64_t umin,
+                                       std::uint64_t umax) {
   return umin + random_u64_bounded_exact(gen, umax - umin);
 }
 
-// without rotation
-using xcg128_t = xcg<false, 0, false>;
-using xcg256_t = xcg<true, 0, false>;
-using xcg320_t = xcg<true, 1, false>;
-using xcg384_t = xcg<true, 2, false>;
-using xcg512_t = xcg<true, 4, false>;
-using xcg768_t = xcg<true, 8, false>;
-using xcg1280_t = xcg<true, 16, false>;
+// without random rotation
+using xcg128_t = xcg_gen<BaseGen::MCG, 0, false>;
+using xcg128i_t = xcg_gen<BaseGen::LCG_FIXED, 0, false>;
+using xcg256_t = xcg_gen<BaseGen::LCG_PARAM, 0, false>;
+using xcg320_t = xcg_gen<BaseGen::LCG_PARAM, 1, false>;
+using xcg384_t = xcg_gen<BaseGen::LCG_PARAM, 2, false>;
+using xcg512_t = xcg_gen<BaseGen::LCG_PARAM, 4, false>;
+using xcg768_t = xcg_gen<BaseGen::LCG_PARAM, 8, false>;
+using xcg1280_t = xcg_gen<BaseGen::LCG_PARAM, 16, false>;
 
-// with rotation
-using xcg128r_t = xcg<false, 0, true>;
-using xcg256r_t = xcg<true, 0, true>;
-using xcg320r_t = xcg<true, 1, true>;
-using xcg384r_t = xcg<true, 2, true>;
-using xcg512r_t = xcg<true, 4, true>;
-using xcg768r_t = xcg<true, 8, true>;
-using xcg1280r_t = xcg<true, 16, true>;
+// with random rotation
+using xcg128rr_t = xcg_gen<BaseGen::MCG, 0, true>;
+using xcg128irr_t = xcg_gen<BaseGen::LCG_FIXED, 0, true>;
+using xcg256rr_t = xcg_gen<BaseGen::LCG_PARAM, 0, true>;
+using xcg320rr_t = xcg_gen<BaseGen::LCG_PARAM, 1, true>;
+using xcg384rr_t = xcg_gen<BaseGen::LCG_PARAM, 2, true>;
+using xcg512rr_t = xcg_gen<BaseGen::LCG_PARAM, 4, true>;
+using xcg768rr_t = xcg_gen<BaseGen::LCG_PARAM, 8, true>;
+using xcg1280rr_t = xcg_gen<BaseGen::LCG_PARAM, 16, true>;
 
 } // namespace xcg
 
